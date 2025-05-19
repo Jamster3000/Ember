@@ -1,9 +1,0 @@
-
-
-
-
-
-
-apple = 5
-banana = 3
-output(apple)
