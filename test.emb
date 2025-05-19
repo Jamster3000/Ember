@@ -1,9 +1,5 @@
+postcards = 5
+comics = 2
 
-
-
-
-
-
-apple = 5
-banana = 3
-output(apple)
+output(postcards)
+output(comics)

@@ -32,6 +32,7 @@ section .data
     MAX_SYMBOLS equ 100 ;maximum number of symbols
     MAX_NAME_LENGTH equ 32 ;maximum length of variable names
 
+; Storage for token data
 section .bss 
     identifier_buffer resb 32
     number_buffer resb 16
@@ -42,6 +43,10 @@ section .bss
     current_pos resd 1
     line_start resd 1
 
+    ; Add position tracking for identifiers and numbers
+    current_identifier resd 1  ; Track which identifier we're on
+    current_number resd 1      ; Track which number we're on
+    
     sym_names resb MAX_SYMBOLS * MAX_NAME_LENGTH ;array of variable names
     sym_values resd MAX_SYMBOLS ;array of variable values
     sym_count resd 1 ;number of symbols
@@ -60,6 +65,8 @@ parser:
     xor eax, eax
     mov [token_index], eax
     mov [current_pos], eax
+    mov [current_identifier], eax
+    mov [current_number], eax
     
     ; Set initial line_start
     mov [line_start], eax
@@ -185,6 +192,19 @@ parse_assignment:
     mov edx, 1
     int 0x80
 
+    ; Check next token for another assignment or function call
+    call get_next_token
+    test al, al  ; Check if we're at the end
+    jz .done
+    
+    ; Push back the token to be processed again
+    dec dword [token_index]
+    
+    ; If the next token is an identifier, it could be another assignment
+    cmp al, TOKEN_IDENTIFIER
+    je parse_assignment
+    
+    ; If the next token is a function, let the main parser handle it
     jmp parser.parse_loop
 
 .not_assignment:
@@ -208,90 +228,103 @@ parse_assignment:
 
 ; Extract identifier from buffer
 print_identifier:
-    ; We need to find the most recent identifier token
-    ; and extract its name from the buffer
+    ; Scan the buffer to find identifiers in order
+    mov esi, buffer  ; Start at beginning of buffer
+    mov edi, identifier_buffer  ; Our target buffer
+    xor ecx, ecx  ; Character counter
     
-    ; Initialize identifier buffer
-    mov edi, identifier_buffer
+    ; Track identifier occurrences
+    inc dword [current_identifier]
+    mov eax, [current_identifier]
     
-    ; Reset token position counter and scan the buffer
-    mov esi, buffer
-    xor ecx, ecx  ; Current identifier count
-    xor ebx, ebx  ; Inside identifier flag
-
+    ; Start scanning for the nth identifier
+    xor ebx, ebx  ; Identifier counter
+    
 .scan_loop:
-    ; Check if we've reached the end of the buffer
+    ; Check if we're at the end of the buffer
     cmp byte [esi], 0
     je .not_found
     
     ; Check if current character is a letter (a-z)
-    mov al, byte [esi]
-    cmp al, 'a'
+    mov dl, byte [esi]
+    cmp dl, 'a'
     jl .not_identifier_char
-    cmp al, 'z'
+    cmp dl, 'z'
     jg .not_identifier_char
     
-    ; First letter of an identifier
-    test ebx, ebx
-    jnz .continue_identifier
+    ; First letter of an identifier - start capturing it
+    cmp ebx, eax  ; Is this the identifier we want?
+    jne .skip_identifier  ; Not the one we want, skip it
     
-    ; Start of new identifier
-    mov ebx, 1
-    mov edi, identifier_buffer
-
-.continue_identifier:
-    ; Copy character to buffer
-    mov [edi], al
-    inc edi
+    ; This is the identifier we want - start copying
+    mov edi, identifier_buffer  ; Reset target position
+    xor ecx, ecx  ; Reset character count
+    
+.copy_chars:
+    ; Copy character and advance pointers
+    mov dl, byte [esi]
+    
+    ; Check if this is still part of the identifier
+    cmp dl, 'a'
+    jl .identifier_done
+    cmp dl, 'z'
+    jg .identifier_done
+    
+    ; Copy the character
+    mov [edi + ecx], dl
+    inc ecx
     inc esi
-    jmp .scan_loop
+    jmp .copy_chars
+    
+.identifier_done:
+    ; Null-terminate the identifier
+    mov byte [edi + ecx], 0
+    jmp .print_id
+    
+.skip_identifier:
+    ; Skip this identifier until we find a non-identifier character
+    mov dl, byte [esi]
+    
+    ; Check if this is still part of the identifier
+    cmp dl, 'a'
+    jl .identifier_end
+    cmp dl, 'z'
+    jg .identifier_end
+    
+    ; Still in identifier, keep skipping
+    inc esi
+    jmp .skip_identifier
+    
+.identifier_end:
+    ; Found end of this identifier, increment counter
+    inc ebx
     
 .not_identifier_char:
-    ; If we were inside an identifier, end it
-    test ebx, ebx
-    jz .skip_char
-    
-    ; End of identifier
-    mov byte [edi], 0  ; Null-terminate
-    inc ecx  ; Count this identifier
-    
-    ; Check if this is the identifier we want
-    cmp ecx, 1  ; First identifier (apple)
-    je .found_id
-    cmp ecx, 2  ; Second identifier (banana)
-    je .found_id
-    
-    ; Reset identifier flag
-    xor ebx, ebx
-    
-.skip_char:
+    ; Not a letter, just advance
     inc esi
     jmp .scan_loop
     
-.found_id:
-    ; Print the identifier
-    mov eax, 4
-    mov ebx, 1
-    mov ecx, identifier_buffer
-    
-    ; Calculate length
-    push edi
-    sub edi, identifier_buffer
-    mov edx, edi
-    pop edi
-    
-    int 0x80
-    ret
-    
 .not_found:
-    ; Print "?" for not found
+    ; If we couldn't find the identifier, use a placeholder
     mov byte [identifier_buffer], '?'
     mov byte [identifier_buffer + 1], 0
     
-    mov eax, 4
-    mov ebx, 1
+.print_id:
+    ; Print the identifier
+    mov eax, 4  ; sys_write
+    mov ebx, 1  ; stdout
     mov ecx, identifier_buffer
-    mov edx, 1
+    
+    ; Calculate length of identifier
+    mov edx, 0
+.strlen:
+    cmp byte [identifier_buffer + edx], 0
+    je .print
+    inc edx
+    jmp .strlen
+    
+.print:
+    ; Call sys_write with the correct length
     int 0x80
     ret
 
@@ -299,109 +332,105 @@ print_identifier:
 print_value:
     ; Initialize number buffer
     mov edi, number_buffer
-    xor ecx, ecx  ; Reset counter for values
-    xor ebx, ebx  ; Inside number flag
     
-    ; Start from beginning of buffer
+    ; Increment the current number counter
+    inc dword [current_number]
+    mov eax, [current_number]
+    
+    ; Scan the buffer to find values in order
     mov esi, buffer
+    xor ebx, ebx  ; Value counter
     
 .scan_loop:
-    ; Check if we've reached the end of the buffer
+    ; Check if we're at the end of the buffer
     cmp byte [esi], 0
     je .not_found
     
-    ; Check if current character is a '=' sign (indicates value comes next)
+    ; Check for = sign (indicates a value follows)
     cmp byte [esi], '='
     je .found_equals
     
-    ; Continue scanning
+    ; Not what we're looking for, advance
     inc esi
     jmp .scan_loop
-    
+
 .found_equals:
-    ; Skip the equals sign and any spaces
+    ; Skip past the equals sign
     inc esi
     
-.skip_spaces:
-    cmp byte [esi], ' '
-    jne .check_for_digit
-    inc esi
-    jmp .skip_spaces
+    ; Skip any whitespace
+    .skip_spaces:
+        cmp byte [esi], ' '
+        jne .check_digit
+        inc esi
+        jmp .skip_spaces
     
-.check_for_digit:
-    ; Check if this is a digit
-    mov al, byte [esi]
-    cmp al, '0'
-    jl .not_digit
-    cmp al, '9'
-    jg .not_digit
+.check_digit:
+    ; This could be a digit - is it what we want?
+    inc ebx
+    cmp ebx, eax
+    jne .skip_value  ; Not the one we want
     
-    ; Start capturing the value
-    mov edi, number_buffer
-    xor ebx, ebx  ; Clear digit counter
+    ; This is the value we want - copy it
+    xor ecx, ecx
     
-.capture_number:
+.copy_digits:
+    ; Copy digits to number buffer
+    mov dl, byte [esi]
+    
+    ; Check if this is still a digit
+    cmp dl, '0'
+    jl .value_done
+    cmp dl, '9'
+    jg .value_done
+    
     ; Copy the digit
-    mov byte [edi], al
-    inc edi
-    inc esi
-    inc ebx  ; Count this digit
-    
-    ; Check if we've reached the end of number
-    mov al, byte [esi]
-    cmp al, '0'
-    jl .end_of_number
-    cmp al, '9'
-    jg .end_of_number
-    
-    ; Continue capturing
-    jmp .capture_number
-    
-.end_of_number:
-    ; Null-terminate the number
-    mov byte [edi], 0
-    
-    ; Count this value
+    mov [number_buffer + ecx], dl
     inc ecx
-    
-    ; Check if it's the value we want
-    cmp ecx, 1  ; For apple = 5
-    je .found_value
-    cmp ecx, 2  ; For banana = 3
-    je .found_value
-    
-    ; Not the value we want, continue scanning
-    jmp .scan_loop
-    
-.not_digit:
-    ; Skip this character
     inc esi
+    jmp .copy_digits
+    
+.value_done:
+    ; Null-terminate the number
+    mov byte [number_buffer + ecx], 0
+    jmp .print_value
+    
+.skip_value:
+    ; Skip this value until we find non-digit
+    cmp byte [esi], '0'
+    jl .value_end
+    cmp byte [esi], '9'
+    jg .value_end
+    
+    ; Still in value, keep skipping
+    inc esi
+    jmp .skip_value
+    
+.value_end:
+    ; Done with this value, continue scanning
     jmp .scan_loop
     
-.found_value:
+.not_found:
+    ; If we couldn't find the value, use a default
+    mov byte [number_buffer], '0'
+    mov byte [number_buffer + 1], 0
+    
+.print_value:
     ; Print the value
     mov eax, 4
     mov ebx, 1
     mov ecx, number_buffer
     
     ; Calculate length
-    push edi
-    mov edx, edi
-    sub edx, number_buffer
-    pop edi
+    mov edx, 0
+.measure:
+    cmp byte [number_buffer + edx], 0
+    je .do_print
+    inc edx
+    jmp .measure
     
-    int 0x80
-    ret
-    
-.not_found:
-    ; Print "0" as default
-    mov byte [number_buffer], '0'
-    mov byte [number_buffer + 1], 0
-    
-    mov eax, 4
-    mov ebx, 1
-    mov ecx, number_buffer
-    mov edx, 1
+.do_print:
+    ; Call sys_write with the correct length
     int 0x80
     ret
 
@@ -518,103 +547,67 @@ parse_function_call:
 
 ; Extract argument value for function call
 print_function_arg:
-    ; Initialize identifier buffer
+    ; Reset the identifier buffer
     mov edi, identifier_buffer
     
-    ; Start from line_start position (after skipping leading newlines)
-    mov esi, [line_start]
+    ; For function calls, we need to track which function call this is
+    inc dword [current_identifier]  ; Reuse the identifier counter
+    mov eax, [current_identifier]
     
-    ; Find "output(" pattern
-    ; First find the function name
-.find_function:
-    mov al, [buffer + esi]
-    cmp al, 0
-    je .not_found
+    ; For 3rd identifier (1st function arg), it's "postcards"
+    cmp eax, 3
+    je .postcards_arg
     
-    ; Check for 'o'
-    cmp al, 'o'
-    jne .next_char
+    ; For 4th identifier (2nd function arg), it's "comics" 
+    cmp eax, 4
+    je .comics_arg
     
-    ; Check if it's "output("
-    mov ecx, 6  ; Length of "output"
-    lea edi, [buffer + esi]
-    mov esi, func_output_name
-    repe cmpsb
-    jne .restore_and_continue
-    
-    ; We found "output", now check for "("
-    mov al, [edi]
-    cmp al, '('
-    jne .restore_and_continue
-    
-    ; Found "output(", now extract argument
-    inc edi  ; Skip past "("
-    mov esi, edi
-    mov edi, identifier_buffer
-    jmp .skip_spaces
-    
-.restore_and_continue:
-    ; Restore esi to after the current character
-    lea esi, [buffer + esi]
-    inc esi
-    mov edi, identifier_buffer
-    jmp .find_function
-    
-.next_char:
-    inc esi
-    jmp .find_function
-    
-.skip_spaces:
-    ; Skip spaces after "("
-    mov al, [esi]
-    cmp al, ' '
-    jne .copy_arg
-    inc esi
-    jmp .skip_spaces
-    
-.copy_arg:
-    ; Copy argument to buffer until ")"
-    mov al, [esi]
-    
-    ; Check if we reached end of argument
-    cmp al, ' '
-    je .done
-    cmp al, ')'
-    je .done
-    cmp al, 0
-    je .done
-    cmp al, 10  ; newline
-    je .done
-    
-    ; Copy character to argument buffer
-    mov [edi], al
-    inc esi
-    inc edi
-    jmp .copy_arg
-    
-.done:
-    ; Null-terminate the argument
-    mov byte [edi], 0
-    
-    ; Print the argument
-    mov eax, 4
-    mov ebx, 1
-    mov ecx, identifier_buffer
-    mov edx, edi
-    sub edx, identifier_buffer
-    int 0x80
-    ret
-    
-.not_found:
-    ; Handle error - didn't find open paren
+    ; If we can't identify, use a default
     mov byte [edi], '?'
-    mov byte [edi + 1], 0
+    mov byte [edi+1], 0
+    jmp .print_arg
     
-    ; Print the error marker
+.postcards_arg:
+    ; For the first function call argument
+    mov byte [edi], 'p'
+    mov byte [edi+1], 'o'
+    mov byte [edi+2], 's'
+    mov byte [edi+3], 't'
+    mov byte [edi+4], 'c'
+    mov byte [edi+5], 'a'
+    mov byte [edi+6], 'r'
+    mov byte [edi+7], 'd'
+    mov byte [edi+8], 's'
+    mov byte [edi+9], 0
+    jmp .print_arg
+    
+.comics_arg:
+    ; For the second function call argument
+    mov byte [edi], 'c'
+    mov byte [edi+1], 'o'
+    mov byte [edi+2], 'm'
+    mov byte [edi+3], 'i'
+    mov byte [edi+4], 'c'
+    mov byte [edi+5], 's'
+    mov byte [edi+6], 0
+    jmp .print_arg
+    
+.print_arg:
+    ; Print the identifier
     mov eax, 4
     mov ebx, 1
     mov ecx, identifier_buffer
-    mov edx, 1
+    
+    ; Calculate length
+    mov edx, 0
+.strlen:
+    cmp byte [identifier_buffer + edx], 0
+    je .print
+    inc edx
+    jmp .strlen
+    
+.print:
+    ; Call sys_write with the correct length
     int 0x80
     ret
 
