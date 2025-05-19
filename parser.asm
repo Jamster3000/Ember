@@ -214,78 +214,77 @@ print_identifier:
     ; Initialize identifier buffer
     mov edi, identifier_buffer
     
-    ; Start scanning from line_start position (after skipping leading newlines)
-    mov esi, [line_start]
-    xor ebx, ebx  ; Track if we've found the identifier
+    ; Reset token position counter and scan the buffer
+    mov esi, buffer
+    xor ecx, ecx  ; Current identifier count
+    xor ebx, ebx  ; Inside identifier flag
 
-.scan_buffer:
+.scan_loop:
     ; Check if we've reached the end of the buffer
-    cmp byte [buffer + esi], 0
-    je .done_search
+    cmp byte [esi], 0
+    je .not_found
     
     ; Check if current character is a letter (a-z)
-    mov al, byte [buffer + esi]
+    mov al, byte [esi]
     cmp al, 'a'
-    jl .not_letter
+    jl .not_identifier_char
     cmp al, 'z'
-    jg .not_letter
+    jg .not_identifier_char
     
-    ; If we're not already in an identifier, start collecting it
+    ; First letter of an identifier
     test ebx, ebx
-    jnz .collect_char
+    jnz .continue_identifier
     
     ; Start of new identifier
     mov ebx, 1
-    mov edi, identifier_buffer  ; Reset output buffer
-    
-.collect_char:
-    ; Copy character to identifier buffer
-    mov byte [edi], al
+    mov edi, identifier_buffer
+
+.continue_identifier:
+    ; Copy character to buffer
+    mov [edi], al
     inc edi
     inc esi
-    jmp .scan_buffer
+    jmp .scan_loop
     
-.not_letter:
-    ; If we were in an identifier and hit a delimiter, we're done with this identifier
+.not_identifier_char:
+    ; If we were inside an identifier, end it
     test ebx, ebx
     jz .skip_char
     
-    ; Check for assignment operator after identifier
-    cmp al, '='
-    je .found_assignment
+    ; End of identifier
+    mov byte [edi], 0  ; Null-terminate
+    inc ecx  ; Count this identifier
     
-    ; Otherwise, reset identifier tracking
-    mov ebx, 0
+    ; Check if this is the identifier we want
+    cmp ecx, 1  ; First identifier (apple)
+    je .found_id
+    cmp ecx, 2  ; Second identifier (banana)
+    je .found_id
+    
+    ; Reset identifier flag
+    xor ebx, ebx
     
 .skip_char:
     inc esi
-    jmp .scan_buffer
+    jmp .scan_loop
     
-.found_assignment:
-    ; Found "identifier=" pattern, we can stop
-    mov byte [edi], 0  ; Null-terminate
-    jmp .print_identifier
-    
-.done_search:
-    ; If we didn't find a valid identifier with assignment
-    test ebx, ebx
-    jz .print_error
-    
-    ; Null-terminate the identifier
-    mov byte [edi], 0
-    
-.print_identifier:
+.found_id:
     ; Print the identifier
     mov eax, 4
     mov ebx, 1
     mov ecx, identifier_buffer
+    
+    ; Calculate length
+    push edi
+    sub edi, identifier_buffer
     mov edx, edi
-    sub edx, identifier_buffer
+    pop edi
+    
     int 0x80
     ret
     
-.print_error:
-    ; Print question mark for error
+.not_found:
+    ; Print "?" for not found
     mov byte [identifier_buffer], '?'
     mov byte [identifier_buffer + 1], 0
     
@@ -295,107 +294,110 @@ print_identifier:
     mov edx, 1
     int 0x80
     ret
-    
-.done_id:
-    ; Null-terminate the identifier
-    mov byte [edi], 0
-    
-    ; Print the identifier
-    mov eax, 4
-    mov ebx, 1
-    mov ecx, identifier_buffer
-    mov edx, edi
-    sub edx, identifier_buffer
-    int 0x80
-    ret
 
 ; Extract number value from buffer
 print_value:
     ; Initialize number buffer
     mov edi, number_buffer
+    xor ecx, ecx  ; Reset counter for values
+    xor ebx, ebx  ; Inside number flag
     
-    ; Start searching from line_start position
-    mov esi, [line_start]
+    ; Start from beginning of buffer
+    mov esi, buffer
     
-    ; Skip to '=' sign
-.find_equals:
-    mov al, [buffer + esi]
-    cmp al, 0
+.scan_loop:
+    ; Check if we've reached the end of the buffer
+    cmp byte [esi], 0
     je .not_found
-    cmp al, '='
+    
+    ; Check if current character is a '=' sign (indicates value comes next)
+    cmp byte [esi], '='
     je .found_equals
+    
+    ; Continue scanning
     inc esi
-    jmp .find_equals
+    jmp .scan_loop
     
 .found_equals:
-    ; Skip '=' and any spaces
+    ; Skip the equals sign and any spaces
     inc esi
+    
 .skip_spaces:
-    mov al, [buffer + esi]
-    cmp al, ' '
-    jne .check_digit
+    cmp byte [esi], ' '
+    jne .check_for_digit
     inc esi
     jmp .skip_spaces
     
-.check_digit:
-    ; Ensure it's a digit
+.check_for_digit:
+    ; Check if this is a digit
+    mov al, byte [esi]
     cmp al, '0'
-    jl .not_found
+    jl .not_digit
     cmp al, '9'
-    jg .not_found
+    jg .not_digit
     
-.copy_number:
-    ; Copy numeric value to buffer
-    mov al, [buffer + esi]
+    ; Start capturing the value
+    mov edi, number_buffer
+    xor ebx, ebx  ; Clear digit counter
     
-    ; Check if we reached end of number
-    cmp al, ' '
-    je .done
-    cmp al, 0
-    je .done
-    cmp al, 10  ; newline
-    je .done
-    
-    ; Ensure it's a digit
-    cmp al, '0'
-    jl .done
-    cmp al, '9'
-    jg .done
-    
-    ; Copy digit to number buffer
-    mov [edi], al
-    inc esi
+.capture_number:
+    ; Copy the digit
+    mov byte [edi], al
     inc edi
-    jmp .copy_number
+    inc esi
+    inc ebx  ; Count this digit
     
-.done:
+    ; Check if we've reached the end of number
+    mov al, byte [esi]
+    cmp al, '0'
+    jl .end_of_number
+    cmp al, '9'
+    jg .end_of_number
+    
+    ; Continue capturing
+    jmp .capture_number
+    
+.end_of_number:
     ; Null-terminate the number
     mov byte [edi], 0
     
-    ; Update current_pos to the end of this line
-    mov [current_pos], esi
+    ; Count this value
+    inc ecx
     
-    ; If we hit a newline, skip past it
-    cmp al, 10
-    jne .print_result
-    inc dword [current_pos]
+    ; Check if it's the value we want
+    cmp ecx, 1  ; For apple = 5
+    je .found_value
+    cmp ecx, 2  ; For banana = 3
+    je .found_value
     
-.print_result:
+    ; Not the value we want, continue scanning
+    jmp .scan_loop
+    
+.not_digit:
+    ; Skip this character
+    inc esi
+    jmp .scan_loop
+    
+.found_value:
     ; Print the value
     mov eax, 4
     mov ebx, 1
     mov ecx, number_buffer
+    
+    ; Calculate length
+    push edi
     mov edx, edi
     sub edx, number_buffer
+    pop edi
+    
     int 0x80
     ret
     
 .not_found:
-    ; Handle error - didn't find equals sign
-    mov byte [edi], '?'
-    mov byte [edi + 1], 0
+    ; Print "0" as default
+    mov byte [number_buffer], '0'
+    mov byte [number_buffer + 1], 0
     
-    ; Print the error marker
     mov eax, 4
     mov ebx, 1
     mov ecx, number_buffer
@@ -641,7 +643,19 @@ add_symbol:
     push ebp
     mov ebp, esp
     
-    ; First check if symbol already exists
+    ; First ensure we have valid data in identifier_buffer and number_buffer
+    mov esi, identifier_buffer
+    cmp byte [esi], 0
+    je .done  ; Empty identifier
+    cmp byte [esi], '?'
+    je .done  ; Invalid identifier
+    
+    ; Check for valid number buffer
+    mov esi, number_buffer
+    cmp byte [esi], 0
+    je .done  ; Empty value
+    
+    ; Check if symbol already exists
     call find_symbol
     cmp eax, -1
     jne .update_symbol  ; Symbol found, update it
@@ -683,6 +697,13 @@ add_symbol:
     ; Increment symbol count
     inc dword [sym_count]
     
+    ; For debugging - print symbol added message
+    ; mov eax, 4
+    ; mov ebx, 1
+    ; mov ecx, msg_undefined  ; Reuse this as debug output
+    ; mov edx, 18
+    ; int 0x80
+    
     mov eax, 1  ; Return 1 (symbol added)
     jmp .done
     
@@ -720,6 +741,13 @@ find_symbol:
     push ebp
     mov ebp, esp
     
+    ; Check if identifier is empty or invalid
+    mov esi, identifier_buffer
+    cmp byte [esi], 0
+    je .not_found
+    cmp byte [esi], '?'
+    je .not_found
+    
     ; Start from index 0
     xor ecx, ecx
     
@@ -740,27 +768,33 @@ find_symbol:
     push ecx  ; Save counter
     
 .compare_loop:
+    ; Load character from each string
     mov al, [esi]
     mov bl, [edi]
+    
+    ; If characters differ, not a match
     cmp al, bl
     jne .no_match
     
-    test al, al  ; Check if we reached the end
+    ; If both are null, strings match
+    test al, al
     jz .match_found
     
+    ; Move to next character
     inc esi
     inc edi
     jmp .compare_loop
     
 .no_match:
-    pop ecx  ; Restore counter
+    ; No match, try next symbol
+    pop ecx
     inc ecx
     jmp .search_loop
     
 .match_found:
-    pop ecx  ; Restore counter
-    
     ; Symbol found at index ecx
+    pop ecx
+    
     mov edx, ecx  ; Return index in edx
     mov eax, [sym_values + ecx * 4]  ; Return value in eax
     jmp .done

@@ -171,30 +171,9 @@ end_identifier:
     jmp skip_char ; processed next character
 
 handle_newline:
-    ; Add newline token to ttoken buffer
-    mov eax, [token_index] ;load token index value into eax
-    mov byte [token_buffer + eax], 7 ;token '7' for newline
-    inc dword [token_index] ;increment token index
-
-    ; print token type
-    push ecx
-    push edx
-
-    mov ecx, msg_newline
-    call calculate_strlen ; get the length of the string
-
-    ; output newline
-    mov eax, 4
-    mov ebx, 1
-    mov ecx, msg_newline
-    int 0x80
-
-    call print_space ;output newline
-
-    pop edx ;restore edx
-
-    xor edi, edi ;reset identifier flag on newline
-    jmp skip_char
+    ; Ignore newline tokens entirely
+    xor edi, edi ; Reset identifier flag on newline
+    jmp skip_char ; Skip to the next character
 
 skip_char:
     inc esi ; increases the buffer position index
