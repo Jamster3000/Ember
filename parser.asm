@@ -29,7 +29,7 @@ section .data
     msg_output db "OUTPUT: ", 0
     msg_undefined db "Undefined variable", 0
 
-    MAX_SYMBOLS equ 100 ;maximum number of symbols
+    MAX_SYMBOLS equ 200 ;maximum number of symbols
     MAX_NAME_LENGTH equ 32 ;maximum length of variable names
 
 ; Storage for token data
@@ -46,6 +46,7 @@ section .bss
     ; Add position tracking for identifiers and numbers
     current_identifier resd 1  ; Track which identifier we're on
     current_number resd 1      ; Track which number we're on
+    current_function_call resd 1  ; Track which function call we're on
     
     sym_names resb MAX_SYMBOLS * MAX_NAME_LENGTH ;array of variable names
     sym_values resd MAX_SYMBOLS ;array of variable values
@@ -67,6 +68,7 @@ parser:
     mov [current_pos], eax
     mov [current_identifier], eax
     mov [current_number], eax
+    mov [current_function_call], eax
     
     ; Set initial line_start
     mov [line_start], eax
@@ -83,7 +85,7 @@ parser:
     ; Peek at the next token
     mov eax, [token_index]
     mov ebx, token_buffer
-    cmp eax, 1024  ; Maximum buffer size
+    cmp eax, 2048  ; Maximum buffer size
     jge .done      ; If past end, we're done
     
     ; Check if it's a newline token
@@ -233,11 +235,11 @@ print_identifier:
     mov edi, identifier_buffer  ; Our target buffer
     xor ecx, ecx  ; Character counter
     
-    ; Track identifier occurrences
+    ; Track identifier occurrences for assignments only
     inc dword [current_identifier]
     mov eax, [current_identifier]
     
-    ; Start scanning for the nth identifier
+    ; Start scanning for the nth identifier that precedes an assignment
     xor ebx, ebx  ; Identifier counter
     
 .scan_loop:
@@ -252,10 +254,67 @@ print_identifier:
     cmp dl, 'z'
     jg .not_identifier_char
     
-    ; First letter of an identifier - start capturing it
-    cmp ebx, eax  ; Is this the identifier we want?
-    jne .skip_identifier  ; Not the one we want, skip it
+    ; Found start of an identifier - check if it's followed by assignment
+    push esi  ; Save current position
     
+    ; Skip past this identifier to see what follows
+.skip_current_id:
+    mov dl, byte [esi]
+    cmp dl, 'a'
+    jl .check_assignment
+    cmp dl, 'z'
+    jg .check_assignment
+    inc esi
+    jmp .skip_current_id
+    
+.check_assignment:
+    ; Skip whitespace
+.skip_whitespace:
+    cmp byte [esi], ' '
+    jne .check_equals
+    inc esi
+    jmp .skip_whitespace
+    
+.check_equals:
+    ; Check if this identifier is followed by '='
+    cmp byte [esi], '='
+    jne .not_assignment_identifier
+    
+    ; This is an assignment identifier
+    inc ebx
+    pop esi  ; Restore identifier start position
+    
+    ; Is this the one we want?
+    cmp ebx, eax
+    je .found_target_identifier
+    
+    ; Not the one we want, skip past it
+.skip_this_identifier:
+    mov dl, byte [esi]
+    cmp dl, 'a'
+    jl .next_char
+    cmp dl, 'z'
+    jg .next_char
+    inc esi
+    jmp .skip_this_identifier
+    
+.next_char:
+    jmp .not_identifier_char
+    
+.not_assignment_identifier:
+    ; This identifier is not followed by assignment, skip it
+    pop esi  ; Restore position
+    ; Skip past this identifier
+.skip_non_assignment:
+    mov dl, byte [esi]
+    cmp dl, 'a'
+    jl .not_identifier_char
+    cmp dl, 'z'
+    jg .not_identifier_char
+    inc esi
+    jmp .skip_non_assignment
+    
+.found_target_identifier:
     ; This is the identifier we want - start copying
     mov edi, identifier_buffer  ; Reset target position
     xor ecx, ecx  ; Reset character count
@@ -280,24 +339,6 @@ print_identifier:
     ; Null-terminate the identifier
     mov byte [edi + ecx], 0
     jmp .print_id
-    
-.skip_identifier:
-    ; Skip this identifier until we find a non-identifier character
-    mov dl, byte [esi]
-    
-    ; Check if this is still part of the identifier
-    cmp dl, 'a'
-    jl .identifier_end
-    cmp dl, 'z'
-    jg .identifier_end
-    
-    ; Still in identifier, keep skipping
-    inc esi
-    jmp .skip_identifier
-    
-.identifier_end:
-    ; Found end of this identifier, increment counter
-    inc ebx
     
 .not_identifier_char:
     ; Not a letter, just advance
@@ -359,14 +400,14 @@ print_value:
     inc esi
     
     ; Skip any whitespace
-    .skip_spaces:
-        cmp byte [esi], ' '
-        jne .check_digit
-        inc esi
-        jmp .skip_spaces
+.skip_spaces:
+    cmp byte [esi], ' '
+    jne .check_number_start
+    inc esi
+    jmp .skip_spaces
     
-.check_digit:
-    ; This could be a digit - is it what we want?
+.check_number_start: 
+    ; This is a potential number - increment counter
     inc ebx
     cmp ebx, eax
     jne .skip_value  ; Not the one we want
@@ -374,18 +415,27 @@ print_value:
     ; This is the value we want - copy it
     xor ecx, ecx
     
-.copy_digits:
-    ; Copy digits to number buffer
-    mov dl, byte [esi]
+    ; Check for negative sign first
+    cmp byte [esi], '-'
+    jne .copy_digits
     
-    ; Check if this is still a digit
+    ; Copy the negative sign
+    mov dl, byte [esi]
+    mov [number_buffer + ecx], dl
+    inc ecx
+    inc esi
+    
+.copy_digits: ;copy the digits of a variable's value
+    mov dl, byte [esi]
+
+    ;check if this is still a digit
     cmp dl, '0'
     jl .value_done
     cmp dl, '9'
     jg .value_done
-    
-    ; Copy the digit
-    mov [number_buffer + ecx], dl
+
+    ; copy digit
+    mov[number_buffer + ecx], dl
     inc ecx
     inc esi
     jmp .copy_digits
@@ -396,7 +446,9 @@ print_value:
     jmp .print_value
     
 .skip_value:
-    ; Skip this value until we find non-digit
+    ; Skip this value until we find non-digit (handle negative numbers too)
+    cmp byte [esi], '-'
+    je .skip_negative
     cmp byte [esi], '0'
     jl .value_end
     cmp byte [esi], '9'
@@ -406,6 +458,16 @@ print_value:
     inc esi
     jmp .skip_value
     
+.skip_negative: ;skip the negative sign and then the digits
+    inc esi
+.skip_negative_digits: ;skips the negative digits
+    cmp byte [esi], '0'
+    jl .value_end
+    cmp byte [esi], '9'
+    jg .value_end
+    inc esi
+    jmp .skip_negative_digits
+
 .value_end:
     ; Done with this value, continue scanning
     jmp .scan_loop
@@ -440,7 +502,7 @@ get_next_token:
     mov ebx, token_buffer
 
     ; Check if we've reached end of tokens
-    cmp eax, 1024  ; Maximum buffer size
+    cmp eax, 2048  ; Maximum buffer size
     jge .end_of_tokens
 
     ; Get token type
@@ -547,50 +609,103 @@ parse_function_call:
 
 ; Extract argument value for function call
 print_function_arg:
-    ; Reset the identifier buffer
+    ; Increment function call counter to track which call we're processing
+    inc dword [current_function_call]
+    mov eax, [current_function_call]
+    
+    ; Scan buffer to find the nth function call
+    mov esi, buffer
+    xor ebx, ebx  ; Function call counter
+    
+.scan_for_target:
+    cmp byte [esi], 0
+    je .not_found
+    
+    ; Look for 'o' 
+    cmp byte [esi], 'o'
+    jne .advance_scan
+    
+    ; Check if this is "output("
+    push esi
+    inc esi
+    cmp byte [esi], 'u'
+    jne .not_output
+    inc esi
+    cmp byte [esi], 't'
+    jne .not_output
+    inc esi
+    cmp byte [esi], 'p'
+    jne .not_output
+    inc esi
+    cmp byte [esi], 'u'
+    jne .not_output
+    inc esi
+    cmp byte [esi], 't'
+    jne .not_output
+    inc esi
+    cmp byte [esi], '('
+    jne .not_output
+    
+    ; Found "output(" - this is a function call
+    inc ebx
+    pop esi
+    
+    ; Is this the function call we want?
+    cmp ebx, eax
+    je .found_target_function
+    
+    ; Not the one we want, keep scanning
+    jmp .advance_scan
+    
+.not_output:
+    pop esi
+    
+.advance_scan:
+    inc esi
+    jmp .scan_for_target
+    
+.found_target_function:
+    ; Found the target function call, now extract the argument
+    ; Skip to the opening parenthesis
+    add esi, 6  ; Skip "output"
+    inc esi     ; Skip '('
+    
+    ; Skip any whitespace
+.skip_arg_whitespace:
+    cmp byte [esi], ' '
+    jne .start_arg_copy
+    inc esi
+    jmp .skip_arg_whitespace
+    
+.start_arg_copy:
+    ; Copy the argument identifier
     mov edi, identifier_buffer
+    xor ecx, ecx
     
-    ; For function calls, we need to track which function call this is
-    inc dword [current_identifier]  ; Reuse the identifier counter
-    mov eax, [current_identifier]
+.copy_arg_chars:
+    mov dl, byte [esi]
     
-    ; For 3rd identifier (1st function arg), it's "postcards"
-    cmp eax, 3
-    je .postcards_arg
+    ; Check if this is still part of the identifier
+    cmp dl, 'a'
+    jl .arg_done
+    cmp dl, 'z'
+    jg .arg_done
     
-    ; For 4th identifier (2nd function arg), it's "comics" 
-    cmp eax, 4
-    je .comics_arg
+    ; Copy the character
+    mov [edi + ecx], dl
+    inc ecx
+    inc esi
+    jmp .copy_arg_chars
     
-    ; If we can't identify, use a default
-    mov byte [edi], '?'
-    mov byte [edi+1], 0
+.arg_done:
+    ; Null-terminate the identifier
+    mov byte [edi + ecx], 0
     jmp .print_arg
     
-.postcards_arg:
-    ; For the first function call argument
-    mov byte [edi], 'p'
-    mov byte [edi+1], 'o'
-    mov byte [edi+2], 's'
-    mov byte [edi+3], 't'
-    mov byte [edi+4], 'c'
-    mov byte [edi+5], 'a'
-    mov byte [edi+6], 'r'
-    mov byte [edi+7], 'd'
-    mov byte [edi+8], 's'
-    mov byte [edi+9], 0
-    jmp .print_arg
-    
-.comics_arg:
-    ; For the second function call argument
-    mov byte [edi], 'c'
-    mov byte [edi+1], 'o'
-    mov byte [edi+2], 'm'
-    mov byte [edi+3], 'i'
-    mov byte [edi+4], 'c'
-    mov byte [edi+5], 's'
-    mov byte [edi+6], 0
-    jmp .print_arg
+.not_found:
+    ; If we couldn't find the identifier, use a placeholder
+    mov byte [identifier_buffer], '?'
+    mov byte [identifier_buffer + 1], 0
     
 .print_arg:
     ; Print the identifier
@@ -810,16 +925,25 @@ atoi:
     mov ebp, esp
     
     xor eax, eax  ; Initialize result to 0
+    xor ebx, ebx  ; Sign flag (0 = positive, 1 = negative)
+
+    ; Check for negative sign
+    cmp byte [esi], '-'
+    jne .convert_loop
+
+    ; Set negative flag and skip the minus sign
+    mov ebx, 1
+    inc esi
     
 .convert_loop:
     movzx ecx, byte [esi]  ; Get next character
     test ecx, ecx
-    jz .done  ; End of string
+    jz .check_sign  ; End of string
     
     cmp ecx, '0'
-    jl .done  ; Not a digit
+    jl .check_sign  ; Not a digit
     cmp ecx, '9'
-    jg .done  ; Not a digit
+    jg .check_sign  ; Not a digit
     
     ; Multiply result by 10
     imul eax, 10
@@ -831,6 +955,12 @@ atoi:
     ; Next character
     inc esi
     jmp .convert_loop
+    
+.check_sign:
+    ; Apply negative sign if needed
+    test ebx, ebx
+    jz .done
+    neg eax
     
 .done:
     mov esp, ebp

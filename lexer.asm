@@ -23,9 +23,9 @@ section .data
     func_output db "output", 0
 
 section .bss
-    token_buffer resb 1024    ; Buffer to store tokens
+    token_buffer resb 2048    ; Buffer to store tokens
     token_index  resd 1       ; Index to store position in token buffer
-    buffer resb 1024          ; Buffer for file contents
+    buffer resb 2048          ; Buffer for file contents
 
 section .text
     global _start
@@ -41,7 +41,7 @@ _start:
     ; Read file content into buffer
     mov eax, 3          
     mov ecx, buffer      
-    mov edx, 1024      
+    mov edx, 2048      
     int 0x80           
     
     ; Check number of bytes read (in eax)
@@ -80,7 +80,7 @@ lexer: ; Set up initial state for the lexer
     xor edi, edi        ; Inside identifier flag
 
 check_token: ; Processes each token character 
-    cmp esi, 1024 ; compare current buffer position to 1024
+    cmp esi, 2048 ; compare current buffer position to 2048
     jge done ; stop lexer if all tokens processed
 
     xor al, al
@@ -102,6 +102,11 @@ check_token: ; Processes each token character
     cmp al, 10
     je handle_newline
 
+    ; Check for negative sign followed by digit
+    cmp al, '-'
+    je check_negative_number
+
+    ; check for positive digits
     ; less than 0, not a digit
     cmp al, '0'
     jl not_digit
@@ -111,7 +116,54 @@ check_token: ; Processes each token character
 
     ; process number otherwise
     call process_number
-    jmp skip_char
+    jmp consume_remaining_digits
+
+check_negative_number: ; Check if the character is a negative sign
+    ; Look ahead to see if this is a negative number
+    push esi
+    inc esi
+    
+    ; Check if we're still within bounds
+    cmp esi, 2048
+    jge .not_negative_number
+    
+    mov al, [buffer + esi]
+
+    ; check if next character is a digit
+    cmp al, '0'
+    jl .not_negative_number
+    cmp al, '9'
+    jg .not_negative_number
+
+    ; It's a negative number, restore position and process
+    pop esi
+    call process_number
+    jmp consume_remaining_digits
+
+.not_negative_number: ; If not a negative number, restore position
+    ; Not negative number, restore position and continue
+    pop esi
+    mov al, [buffer + esi] ; Restore current character
+    jmp not_digit
+
+consume_remaining_digits: ; Consume remaining digits after negative sign
+    inc esi ; Move to next character
+
+.digit_loop: ; Loop to consume all digits after the negative sign
+    ;check if still in bounds
+    cmp esi, 2048
+    jge check_token
+
+    mov al, [buffer + esi]
+
+    ; check if this is still a digit
+    cmp al, '0'
+    jl check_token
+    cmp al, '9'
+    jg check_token
+
+    inc esi
+    jmp .digit_loop
 
 not_digit: ;process non-digit characters
     ; less than a, not an identifier
