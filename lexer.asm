@@ -1,10 +1,11 @@
+global _start
 global token_buffer
 global token_index
 global buffer
+global print_newline
 extern parser
 
 section .data
-    filename db "test.emb", 0
     lexer_banner db "Lexer output:", 10, 0
     parser_banner db 10, "Parser output:", 10, 0
     space db " ", 0
@@ -21,27 +22,71 @@ section .data
 
     ; Function name to match
     func_output db "output", 0
+    
+    ; Error messages
+    usage_msg db "Usage: ./emberon <filename.emb>", 10, 0
+    file_error_msg db "Error: Could not open file", 10, 0
 
 section .bss
-    token_buffer resb 2048    ; Buffer to store tokens
-    token_index  resd 1       ; Index to store position in token buffer
-    buffer resb 2048          ; Buffer for file contents
+    buffer resb 4096
+    token_buffer resb 4096
+    token_index resd 1
+    filename_ptr resd 1
 
 section .text
-    global _start
 
 _start:
-    ; Open the file 
-    mov eax, 5           
-    mov ebx, filename    
-    mov ecx, 0        
-    int 0x80         
-    mov ebx, eax       
+    ; Check if we have command line arguments
+    ; ESP points to: [argc] [argv[0]] [argv[1]] [argv[2]] ...
+    mov eax, [esp]      ; Get argc
+    cmp eax, 2          ; We need exactly 2 args (program name + filename)
+    jne .usage_error
+    
+    ; Get filename from argv[1]
+    mov eax, [esp + 8]  ; argv[1] is at esp + 8
+    mov [filename_ptr], eax
+    
+    jmp lexer
+    
+.usage_error:
+    ; Print usage message
+    mov eax, 4
+    mov ebx, 1
+    mov ecx, usage_msg
+    mov edx, 33
+    int 0x80
+    
+    ; Exit with error code
+    mov eax, 1
+    mov ebx, 1
+    int 0x80
+
+lexer:
+    ; Print lexer banner
+    mov eax, 4
+    mov ebx, 1
+    mov ecx, lexer_banner
+    mov edx, 14
+    int 0x80
+
+    ; Open file
+    mov eax, 5          ; sys_open
+    mov ebx, [filename_ptr]  ; Use filename from command line
+    mov ecx, 0          ; O_RDONLY
+    mov edx, 0          ; No permissions needed for reading
+    int 0x80
+
+    ; Check if file opened successfully
+    test eax, eax
+    js .file_error
+
+    ; Store file descriptor
+    mov ebx, eax        ; Save file descriptor
 
     ; Read file content into buffer
-    mov eax, 3          
-    mov ecx, buffer      
-    mov edx, 2048      
+    mov eax, 3          ; sys_read
+    mov ecx, buffer     ; buffer to read into
+    mov edx, 4096       ; max bytes to read (updated buffer size)
     int 0x80           
     
     ; Check number of bytes read (in eax)
@@ -51,36 +96,33 @@ _start:
     ; Null-terminate the buffer after the bytes read
     mov byte [buffer + eax], 0
 
-    ; Print lexer banner
-    mov eax, 4
-    mov ebx, 1
-    mov ecx, lexer_banner
-    mov edx, 17
+    ; Close file
+    mov eax, 6          ; sys_close
     int 0x80
 
-    ; Call lexer to process the buffer
-    call lexer
+    ; Call tokenizer to process the buffer
+    call tokenize
+    ; tokenize will handle calling the parser and exiting
 
-    ; Print parser banner
+.file_error:
+    ; Print file error message
     mov eax, 4
     mov ebx, 1
-    mov ecx, parser_banner
-    mov edx, 17
+    mov ecx, file_error_msg
+    mov edx, 29
     int 0x80
-
-    call parser
-
-    ; Exit program
+    
+    ; Exit with error code
     mov eax, 1
-    xor ebx, ebx
+    mov ebx, 1
     int 0x80
 
-lexer: ; Set up initial state for the lexer
+tokenize: ; Set up initial state for the lexer
     xor esi, esi        ; Buffer index
     xor edi, edi        ; Inside identifier flag
 
 check_token: ; Processes each token character 
-    cmp esi, 2048 ; compare current buffer position to 2048
+    cmp esi, 4096 ; compare current buffer position to 4096 (updated)
     jge done ; stop lexer if all tokens processed
 
     xor al, al
@@ -124,7 +166,7 @@ check_negative_number: ; Check if the character is a negative sign
     inc esi
     
     ; Check if we're still within bounds
-    cmp esi, 2048
+    cmp esi, 4096
     jge .not_negative_number
     
     mov al, [buffer + esi]
@@ -151,7 +193,7 @@ consume_remaining_digits: ; Consume remaining digits after negative sign
 
 .digit_loop: ; Loop to consume all digits after the negative sign
     ;check if still in bounds
-    cmp esi, 2048
+    cmp esi, 4096
     jge check_token
 
     mov al, [buffer + esi]
@@ -254,6 +296,7 @@ process_identifier: ; Processes an identifier token
     mov ecx, 6         ; "output" length (currently)
     lea esi, [buffer + esi]
     repe cmpsb ; compare string byte-by-byte with function name
+    
     je .is_function ; jump to .is_function if equal, continue if not
     
     pop esi            ; Restore buffer position
@@ -411,14 +454,29 @@ print_newline: ;Outputs a newline
 
 done: ; End of lexer - cleanup
     call print_newline
-    ret
+    
+    ; Print parser banner
+    mov eax, 4
+    mov ebx, 1
+    mov ecx, parser_banner
+    mov edx, 17
+    int 0x80
+
+    ; Call parser
+    call parser
+
+    ; Exit program properly - DON'T RETURN, EXIT!
+    mov eax, 1
+    xor ebx, ebx
+    int 0x80
+    ; No return here - program should exit
 
 calculate_strlen: ; Calculate string length - expects string address in ecx, returns length in edx
     xor edx, edx
-.loop: ;Jumps to .done and returns if ecx + edx is null terminator (0) otherwise increment edx by 1 and jumps to .loop again
-    cmp byte [ecx + edx], 0
-    je .done
-    inc edx
-    jmp .loop
-.done:
-    ret
+    .loop: ;Jumps to .done and returns if ecx + edx is null terminator (0) otherwise increment edx by 1 and jumps to .loop again
+        cmp byte [ecx + edx], 0
+        je .done
+        inc edx
+        jmp .loop
+    .done:
+        ret
